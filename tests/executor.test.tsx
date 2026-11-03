@@ -51,6 +51,17 @@ test('only an explicit review:false skips the review', async () => {
   expect(of(plan('"review":"no",'))).toBe(true)
 })
 
+test('a brief carrying its own fenced code still parses (the fence inside a JSON string is not the end)', async () => {
+  const brief = 'Replace the example:\\n```python\\nfoundry.write_xlsx(\\"r.xlsx\\", rows)\\n```\\nthen run the test.'
+  const plan = parsePlan(
+    `\`\`\`json\n{"summary":"s","steps":[{"n":1,"title":"a","model":"haiku","brief":"${brief}"},{"n":2,"brief":"b {x}"}]}\n\`\`\``,
+  )
+  expect(typeof plan).toBe('object')
+  if (typeof plan === 'string') return
+  expect(plan.steps[0]?.brief).toContain('```python')
+  expect(plan.steps.length).toBe(2)
+})
+
 test('a plan that is not a plan is refused by name', async () => {
   expect(parsePlan('I could not plan this.')).toBe('the planner did not answer with a JSON plan')
   expect(

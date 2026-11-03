@@ -257,15 +257,39 @@ type PlanStep = {
   brief: string
 }
 
+/**
+ * The first whole JSON object at or after `from`, read by scanning — never by looking for the closing fence. A brief
+ * routinely carries its own fenced code (```python …```) inside a JSON string, so "up to the next ```" cut every such
+ * plan short and refused it as "not a JSON plan" (three runs in a row, 2026-11-03).
+ */
+export function firstObject(text: string, from = 0): string | null {
+  const start = text.indexOf('{', from)
+  if (start < 0) return null
+  let depth = 0
+  let inString = false
+  for (let i = start; i < text.length; i++) {
+    const c = text[i]
+    if (inString) {
+      if (c === '\\') i++
+      else if (c === '"') inString = false
+    } else if (c === '"') inString = true
+    else if (c === '{') depth++
+    else if (c === '}' && --depth === 0) return text.slice(start, i + 1)
+  }
+  return null
+}
+
 export function parsePlan(text: string): { summary: string; review: boolean; steps: PlanStep[] } | string {
-  const fenced = /```json\s*([\s\S]*?)```/i.exec(text)
-  const raw = fenced?.[1] !== undefined ? fenced[1] : text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1)
+  const fence = /```json/i.exec(text)
+  const raw = firstObject(text, fence ? fence.index : 0)
   let data: unknown
   try {
-    data = JSON.parse(raw)
+    data = raw === null ? undefined : JSON.parse(raw)
   } catch {
-    return 'the planner did not answer with a JSON plan'
+    data = undefined
   }
+  if (!data || typeof data !== 'object') return 'the planner did not answer with a JSON plan'
+
   const d = data as { summary?: unknown; review?: unknown; steps?: unknown }
   if (!Array.isArray(d.steps) || d.steps.length === 0) return 'the plan has no steps'
   if (d.steps.length > MAX_STEPS) return `the plan has ${d.steps.length} steps (at most ${MAX_STEPS})`
