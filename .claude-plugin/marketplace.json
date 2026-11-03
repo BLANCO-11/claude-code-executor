@@ -1,0 +1,5 @@
+{
+  "name": "claude-code-executor",
+  "owner": { "name": "BLANCO-11" },
+  "plugins": [{ "name": "executor", "source": "./" }]
+}

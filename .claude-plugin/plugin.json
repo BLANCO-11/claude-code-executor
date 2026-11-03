@@ -1,0 +1,6 @@
+{
+  "name": "executor",
+  "version": "0.1.0",
+  "description": "Plan with Opus 5.5 (medium), code with Sonnet/Haiku 5.5, review with Opus; a live flow pane shows each agent and the data passed between them",
+  "types": "./types/index.d.ts"
+}
