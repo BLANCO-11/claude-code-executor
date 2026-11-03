@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { parsePlan } from '../hooks/register'
-import { arcadeSvg } from '../hooks/view'
+import { flowSvg } from '../hooks/view'
 import type { AgentNode, Run } from '../types'
 
 const PANE = {
@@ -70,7 +70,7 @@ test('a plan that is not a plan is refused by name', async () => {
   expect(parsePlan('```json\n{"steps":[{"n":1,"brief":""}]}\n```')).toBe('step 1 has no brief')
 })
 
-test('the flow drawing has one card per agent and escapes text', async () => {
+test('the flow drawing shows each agent, its state and what moves', async () => {
   const run: Run = {
     id: 'x1',
     task: 'Fix <the> settings page & dialog',
@@ -83,21 +83,51 @@ test('the flow drawing has one card per agent and escapes text', async () => {
     ],
     reviewer: { ...node('waiting', 'claude-opus-5-5'), role: 'reviewer' },
   }
-  const svg = arcadeSvg(run, 5000, '1')
+  const svg = flowSvg(run, 5000, '1')
   expect(svg.startsWith('<svg')).toBe(true)
-  expect(svg).toContain('OPUS·MED')
+  expect(svg).toContain('OPUS · MED')
   expect(svg).toContain('SONNET')
   expect(svg).toContain('HAIKU')
-  expect(svg).toContain('STAGE CODE')
-  // The running coder says what it is doing; the others say nothing.
-  expect(svg.match(/READ TOOLS\/PAGE.TSX/g)?.length).toBe(1)
+  expect(svg).toContain('CODING')
+  expect(svg).toContain('0 / 2 STEPS')
+  expect(svg).toContain('01 / WORKING')
+  expect(svg).toContain('02 / QUEUED')
+  expect(svg).toContain('Starts after step 1')
+  expect(svg).toContain('✓ PLAN READY · 2 STEPS')
+  // The running coder says what it is doing, on its card and in the NOW line.
+  expect(svg).toContain('▸ READ TOOLS/PAGE.TSX')
+  expect(svg).toContain('Sonnet 5.5 · step 1 · read tools/page.tsx')
   expect(svg).not.toContain('<the>')
-  // The running coder's antenna, eyes and bob animate; nobody else's does.
+  // Only the running coder's orb spins.
   expect(svg.match(/animateTransform/g)?.length).toBe(1)
-  // Packets ride only the conveyor into the running coder: two of them.
+  // Dots ride only the line into the running coder: two of them.
   expect(svg.match(/<animateMotion/g)?.length).toBe(2)
   // The focused card is outlined.
   expect(svg).toContain('stroke-dasharray="3 3"')
+})
+
+test('a finished run says how it ended', async () => {
+  const done = (verdict: string, status: Run['status']): string =>
+    flowSvg(
+      {
+        id: 'x2',
+        task: 't',
+        status,
+        startedAt: 0,
+        endedAt: 65_000,
+        verdict,
+        planner: { ...node('done', 'claude-opus-5-5'), role: 'planner' },
+        steps: [{ n: 1, title: 'a', brief: 'b', files: [], dependsOn: [], node: node('done', 'claude-haiku-5-5') }],
+        reviewer: { ...node(verdict === 'NOT REVIEWED' ? 'skipped' : 'done', 'claude-opus-5-5'), role: 'reviewer' },
+      },
+      70_000,
+      '',
+    )
+  expect(done('PASS', 'done')).toContain('✓ PASSED')
+  expect(done('PASS', 'done')).toContain('Finished in 01:05')
+  expect(done('NOT REVIEWED', 'done')).toContain('– SKIPPED · SMALL CHANGE')
+  expect(done('NEEDS-WORK', 'failed')).toContain('! NEEDS WORK')
+  expect(done('PASS', 'done')).not.toContain('animateMotion')
 })
 
 test('the pane says when there is nothing to show', async ($, on) => {

@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
 import type { AgentNode, NodeStatus, Run, Step } from '../types'
-import { arcadeSvg, clip, elapsed, k, modelOf, stageOf, totals } from './view'
+import { flowSvg, clip, elapsed, k, modelOf, stageOf, totals } from './view'
 
 // The executor: Opus 5.5 plans (medium effort), Sonnet 5.5 or Haiku 5.5 codes
 // each step the plan names, Opus 5.5 reviews the diff. The model calls one tool
@@ -604,7 +604,7 @@ export const register: Register = on => {
     const now = Date.now()
     const cards: { id: string; label: string; node: AgentNode; brief?: string }[] = [
       { id: 'planner', label: 'Plan', node: run.planner },
-      ...run.steps.map(s => ({ id: String(s.n), label: `${s.n}`, node: s.node, brief: s.brief })),
+      ...run.steps.map(s => ({ id: String(s.n), label: `Step ${s.n}`, node: s.node, brief: s.brief })),
       { id: 'reviewer', label: 'Review', node: run.reviewer },
     ]
     const toggle = (id: string) => () => void update($, focus, f => (f === id ? '' : id))
@@ -620,7 +620,7 @@ export const register: Register = on => {
       <Box flexDirection="column" gap={1}>
         {Svg ? (
           el(Svg, {
-            source: arcadeSvg(run, now, open),
+            source: flowSvg(run, now, open),
             alt: `Executor run ${run.id}, stage ${stageOf(run)}: planner ${run.planner.status}, ${run.steps.length} coders, review ${run.reviewer.status}`,
             isInteractive: true,
           })
@@ -631,7 +631,7 @@ export const register: Register = on => {
             </Text>
             {cards.map(c => (
               <Text>
-                {mark[c.node.status]} {c.id === 'planner' ? 'Planner' : c.id === 'reviewer' ? 'Review' : `Step ${c.label}`} · {modelOf(c.node.model).name} · {elapsed(c.node, now)}
+                {mark[c.node.status]} {c.id === 'planner' ? 'Planner' : c.label} · {modelOf(c.node.model).name} · {elapsed(c.node, now)}
               </Text>
             ))}
           </Box>
@@ -655,7 +655,7 @@ export const register: Register = on => {
         {picked && (
           <Box flexDirection="column" gap={1}>
             <Text bold>
-              {picked.id === 'planner' ? 'Planner' : picked.id === 'reviewer' ? 'Review' : `Step ${picked.label}`} · {modelOf(picked.node.model).name}
+              {picked.id === 'planner' ? 'Planner' : picked.label} · {modelOf(picked.node.model).name}
               {picked.node.effort ? ` · ${picked.node.effort}` : ''} · {picked.node.status} · {elapsed(picked.node, now)} · in {k(picked.node.tokensIn)} · cached {k(picked.node.tokensCached)} · out {k(picked.node.tokensOut)}
             </Text>
             <Text dimColor>HANDED IN</Text>
