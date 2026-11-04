@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { givenPlan, parsePlan, stepPassed } from '../hooks/register'
-import { flowSvg } from '../hooks/view'
+import { costOf, flowSvg, tokenLine } from '../hooks/view'
 import type { AgentNode, Run } from '../types'
 
 const PANE = {
@@ -189,4 +189,38 @@ test('a run with given briefs says the planner was skipped and no review was ask
   expect(svg).toContain('– SKIPPED · 1 BRIEF GIVEN')
   expect(svg).toContain('– SKIPPED · NOT ASKED')
   expect(svg).toContain('DONE · NOT REVIEWED')
+})
+
+test('the token count leaves out cache reads, and the advanced view splits it', async () => {
+  const heavy = { ...node('done', 'claude-opus-5-5'), role: 'planner' as const, tokensIn: 2000, tokensCached: 90_000, tokensOut: 500 }
+  const run: Run = {
+    id: 'x4',
+    task: 't',
+    status: 'done',
+    startedAt: 0,
+    endedAt: 1_000,
+    verdict: 'NOT ASKED',
+    planner: heavy,
+    steps: [],
+    reviewer: { ...node('skipped', 'claude-opus-5-5'), role: 'reviewer', tokensIn: 0, tokensOut: 0 },
+  }
+  // Opus: 2,000 in at $4, 90,000 cache reads at $0.20, 500 out at $20 per million = $0.036.
+  expect(tokenLine(heavy, false)).toBe('new tokens 2.5K · ≈ $0.04')
+  expect(tokenLine(heavy, true)).toBe('in 2.0K · cached 90.0K · out 500 · ≈ $0.04')
+  const plain = flowSvg(run, 2_000, '')
+  expect(plain).toContain('NEW TOKENS <tspan fill="#')
+  expect(plain).toContain('>2.5K</tspan>')
+  expect(plain).toContain('COST <tspan fill="#e')
+  expect(plain).not.toContain('92.5K')
+  expect(plain).not.toContain('CACHE READ')
+  const adv = flowSvg(run, 2_000, '', true)
+  expect(adv).toContain('CACHE READ')
+  expect(adv).toContain('>90.0K</text>')
+})
+
+test('a cache write costs a quarter more than fresh input, and an unknown model costs nothing', async () => {
+  const n = { tokensIn: 1_000_000, tokensWritten: 1_000_000, tokensCached: 0, tokensOut: 0 }
+  expect(costOf('SONNET', n)).toBe(2.5)
+  expect(costOf('SONNET', { ...n, tokensWritten: 0 })).toBe(2)
+  expect(costOf('GEMMA', n)).toBe(0)
 })

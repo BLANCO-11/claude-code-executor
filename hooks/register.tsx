@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
 import type { AgentNode, NodeStatus, Run, Step } from '../types'
-import { flowSvg, clip, elapsed, k, modelOf, stageOf, totals } from './view'
+import { flowSvg, clip, elapsed, k, modelOf, spent, stageOf, tokenLine, totals, usd } from './view'
 
 // The executor: Opus 5.5 plans (medium effort), Sonnet 5.5 or Haiku 5.5 codes
 // each step the plan names, Opus 5.5 reviews the diff. When the caller has
@@ -36,6 +36,7 @@ const runs = atom({ plugin: 'executor', key: 'runs' } as const, [], {
 })
 const selected = atom({ plugin: 'executor', key: 'selected' } as const, 0)
 const focus = atom({ plugin: 'executor', key: 'focus' } as const, '')
+const advanced = atom({ plugin: 'executor', key: 'advanced' } as const, false)
 
 // ── Prompts ────────────────────────────────────────────────────────────────
 
@@ -235,6 +236,7 @@ async function runAgent(
     outChars: got.answer.length,
     tokensIn: (got.usage?.input_tokens ?? 0) + (got.usage?.cache_creation_input_tokens ?? 0),
     tokensCached: got.usage?.cache_read_input_tokens ?? 0,
+    tokensWritten: got.usage?.cache_creation_input_tokens ?? 0,
     tokensOut: got.usage?.output_tokens ?? 0,
     summary: firstLines(got.answer, 3) || `ended: ${got.reason}`,
     report: clip(got.answer, REPORT_CAP),
@@ -681,6 +683,7 @@ export const register: Register = on => {
     const list = await read($, runs)
     const at = Math.min(await read($, selected), Math.max(0, list.length - 1))
     const open = await read($, focus)
+    const adv = await read($, advanced)
     const run = list[at]
     if (!run)
       return (
@@ -708,7 +711,7 @@ export const register: Register = on => {
       <Box flexDirection="column" gap={1}>
         {Svg ? (
           el(Svg, {
-            source: flowSvg(run, now, open),
+            source: flowSvg(run, now, open, adv),
             alt: `Executor run ${run.id}, stage ${stageOf(run)}: planner ${run.planner.status}, ${run.steps.length} coders, review ${run.reviewer.status}`,
             isInteractive: true,
           })
@@ -735,6 +738,7 @@ export const register: Register = on => {
           {list.length > 1 && at < list.length - 1 && (
             <Button key="older" label="◀ older run" onPress={() => void update($, selected, x => Math.min(x + 1, list.length - 1))} />
           )}
+          <Button key="advanced" label={adv ? 'Hide token split' : 'Token split'} onPress={() => void update($, advanced, a => !a)} />
           {at > 0 && <Button key="newer" label="newer run ▶" onPress={() => void update($, selected, x => Math.max(0, x - 1))} />}
         </Box>
 
@@ -744,7 +748,7 @@ export const register: Register = on => {
           <Box flexDirection="column" gap={1}>
             <Text bold>
               {picked.id === 'planner' ? 'Planner' : picked.label} · {modelOf(picked.node.model).name}
-              {picked.node.effort ? ` · ${picked.node.effort}` : ''} · {picked.node.status} · {elapsed(picked.node, now)} · in {k(picked.node.tokensIn)} · cached {k(picked.node.tokensCached)} · out {k(picked.node.tokensOut)}
+              {picked.node.effort ? ` · ${picked.node.effort}` : ''} · {picked.node.status} · {elapsed(picked.node, now)} · {tokenLine(picked.node, adv)}
             </Text>
             <Text dimColor>HANDED IN</Text>
             {Markdown ? el(Markdown, { text: clip(picked.brief ?? picked.node.prompt ?? '—', 4000) }) : <Text>{clip(picked.brief ?? picked.node.prompt ?? '—', 4000)}</Text>}
@@ -762,7 +766,7 @@ export const register: Register = on => {
         {!picked && totals(run).length > 0 && !Svg && (
           <Text dimColor>
             {totals(run)
-              .map(([name, t]) => `${name} ${k(t.in + t.cached + t.out)}`)
+              .map(([name, t]) => `${name} ${k(spent(t))} new ≈ ${usd(t.usd)}${adv ? ` (in ${k(t.in)} · cached ${k(t.cached)} · out ${k(t.out)})` : ''}`)
               .join(' · ')}
           </Text>
         )}

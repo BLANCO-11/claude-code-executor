@@ -11,6 +11,8 @@ export type AgentNode = {
   tokensIn: number
   tokensOut: number
   tokensCached: number
+  /** Of tokensIn, how many were written to the cache (billed at 1.25× input). Absent on runs recorded before it was kept. */
+  tokensWritten?: number
   /** Characters handed to the agent (its prompt). */
   inChars: number
   /** Characters it handed back (its report). */
@@ -56,6 +58,8 @@ declare module 'claude-code' {
       selected: number
       /** Which agent's details are open: 'planner', 'reviewer', a step number as text, or '' for none. */
       focus: string
+      /** The advanced view: tokens split into in, cached and out, not just what was spent. */
+      advanced: boolean
     }
   }
 }

@@ -4,7 +4,9 @@ import type { AgentNode, Run, Step } from '../types'
 // the run's state, the goal, then three columns — the planner, one card per
 // coding step, the reviewer — joined by thin lines a dot travels along while
 // data moves. Beneath them, one sentence saying what is happening now, and the
-// tokens each model has used. Colour carries state, so the words stay short:
+// tokens each model has used: input and output only, since a cache read
+// costs a tenth of fresh input and would drown the number that matters. The
+// advanced view splits them into in, cached and out. Colour carries state, so the words stay short:
 // cyan is working, green is done, amber needs a look, red failed, grey waits.
 
 export const PX = {
@@ -101,17 +103,58 @@ function runState(run: Run): { word: string; color: string } {
   return { word, color: PX.cyan }
 }
 
-export function totals(run: Run): [string, { in: number; cached: number; out: number; color: string }][] {
-  const by = new Map<string, { in: number; cached: number; out: number; color: string }>()
+export type Tally = { in: number; written: number; cached: number; out: number; usd: number; color: string }
+
+// List prices in $ per million tokens: input, output, cache read. A cache
+// write bills at 1.25× input. Haiku's rate is the one for prompts of 100K
+// tokens or fewer, which a coder's prompt always is.
+const PRICE: Record<string, [number, number, number]> = {
+  OPUS: [4, 20, 0.2],
+  SONNET: [2, 10, 0.2],
+  HAIKU: [0.1, 0.5, 0.01],
+}
+
+/** An estimate at list price; 0 for a model the table does not know. */
+export function costOf(short: string, n: { tokensIn: number; tokensWritten?: number; tokensCached: number; tokensOut: number }): number {
+  const p = PRICE[short]
+  if (!p) return 0
+  const written = n.tokensWritten ?? 0
+  return ((n.tokensIn - written) * p[0] + written * p[0] * 1.25 + n.tokensCached * p[2] + n.tokensOut * p[1]) / 1_000_000
+}
+
+export function usd(x: number): string {
+  return x >= 1 ? `$${x.toFixed(2)}` : x >= 0.01 ? `$${x.toFixed(2)}` : x > 0 ? '<$0.01' : '$0'
+}
+
+export function totals(run: Run): [string, Tally][] {
+  const by = new Map<string, Tally>()
   for (const n of [run.planner, ...run.steps.map(s => s.node), run.reviewer]) {
     const m = modelOf(n.model)
-    const t = by.get(m.short) ?? { in: 0, cached: 0, out: 0, color: m.color }
+    const t = by.get(m.short) ?? { in: 0, written: 0, cached: 0, out: 0, usd: 0, color: m.color }
     t.in += n.tokensIn
+    t.written += n.tokensWritten ?? 0
     t.cached += n.tokensCached
     t.out += n.tokensOut
+    t.usd += costOf(m.short, n)
     by.set(m.short, t)
   }
   return [...by.entries()].filter(([, t]) => t.in + t.out + t.cached > 0)
+}
+
+/** The tokens worth watching: fresh input (cache writes included) and output. Cache reads are left out. */
+export function spent(t: { in: number; out: number }): number {
+  return t.in + t.out
+}
+
+/** One agent's tokens, as the pane writes them: the spent total, or the full split in the advanced view. */
+export function tokenLine(
+  n: { model: string; tokensIn: number; tokensWritten?: number; tokensCached: number; tokensOut: number },
+  advanced: boolean,
+): string {
+  const cost = `≈ ${usd(costOf(modelOf(n.model).short, n))}`
+  return advanced
+    ? `in ${k(n.tokensIn)} · cached ${k(n.tokensCached)} · out ${k(n.tokensOut)} · ${cost}`
+    : `new tokens ${k(spent({ in: n.tokensIn, out: n.tokensOut }))} · ${cost}`
 }
 
 function statusGlyph(n: AgentNode): string {
@@ -255,7 +298,7 @@ function stepCard(x: number, y: number, w: number, h: number, s: Step, steps: St
   const line = stepLine(s, steps)
   if (line) out.push(`<text x="${x + 20}" y="${y + 62}" fill="${live ? PX.cyan : PX.muted}" font-size="10.5">${esc(clip(line, lineChars))}</text>`)
   out.push(
-    `<text x="${x + 20}" y="${y + h - 12}" fill="${m.color}" font-size="9.5" font-weight="700" letter-spacing="1.5">${m.short}<tspan fill="${PX.faint}" font-weight="400"> · ${elapsed(n, now)}${n.tokensOut ? ` · OUT ${k(n.tokensOut)}` : ''}${n.toolCalls ? ` · ${n.toolCalls} CALLS` : ''}</tspan></text>`,
+    `<text x="${x + 20}" y="${y + h - 12}" fill="${m.color}" font-size="9.5" font-weight="700" letter-spacing="1.5">${m.short}<tspan fill="${PX.faint}" font-weight="400"> · ${elapsed(n, now)}${n.tokensIn + n.tokensOut ? ` · ${k(n.tokensIn + n.tokensOut)} NEW · ≈ ${usd(costOf(m.short, n))}` : ''}${n.toolCalls ? ` · ${n.toolCalls} CALLS` : ''}</tspan></text>`,
   )
   out.push(orb(x + w - 34, y + h / 2, m.color, n))
   return `<g>${out.join('')}</g>`
@@ -283,7 +326,7 @@ function nowLine(run: Run, now: number): { text: string; color: string } {
 }
 
 /** The whole picture for one run, at a fixed 980-pixel width the pane scales. */
-export function flowSvg(run: Run, now: number, focus: string): string {
+export function flowSvg(run: Run, now: number, focus: string, advanced = false): string {
   const W = 980
   const pad = 28
   const steps = run.steps
@@ -292,7 +335,7 @@ export function flowSvg(run: Run, now: number, focus: string): string {
   const colTop = 152
   const colH = Math.max(186, steps.length ? steps.length * cardH + (steps.length - 1) * gap : cardH)
   const bodyEnd = colTop + colH + 24
-  const H = bodyEnd + 100
+  const H = bodyEnd + 92 + Math.max(1, totals(run).length) * 24
   const planX = pad + 24
   const codeX = 290
   const codeW = 380
@@ -311,7 +354,8 @@ export function flowSvg(run: Run, now: number, focus: string): string {
 
   // Header.
   const rs = runState(run)
-  const total = totals(run).reduce((a, [, t]) => a + t.in + t.cached + t.out, 0)
+  const total = totals(run).reduce((a, [, t]) => a + spent(t), 0)
+  const cost = totals(run).reduce((a, [, t]) => a + t.usd, 0)
   g.push(`<text x="${pad + 4}" y="50" fill="${PX.cyan}" font-size="17" font-weight="700" letter-spacing="2.5">◆ EXECUTOR</text>`)
   g.push(`<text x="${pad + 190}" y="49" fill="${PX.muted}" font-size="11" letter-spacing="1.5">RUN ${esc(run.id.toUpperCase())}</text>`)
   g.push(
@@ -319,7 +363,7 @@ export function flowSvg(run: Run, now: number, focus: string): string {
   )
   g.push(`<text x="${pad + 330}" y="49" fill="${rs.color}" font-size="11" font-weight="700" letter-spacing="1.5">${esc(rs.word)}</text>`)
   g.push(
-    `<text x="${W - pad - 4}" y="49" fill="${PX.muted}" font-size="11" letter-spacing="1.5" text-anchor="end">TIME <tspan fill="${PX.text}">${clock((run.endedAt ?? now) - run.startedAt)}</tspan>      TOKENS <tspan fill="${PX.text}">${k(total)}</tspan></text>`,
+    `<text x="${W - pad - 4}" y="49" fill="${PX.muted}" font-size="11" letter-spacing="1.5" text-anchor="end">TIME <tspan fill="${PX.text}">${clock((run.endedAt ?? now) - run.startedAt)}</tspan>    NEW TOKENS <tspan fill="${PX.text}">${k(total)}</tspan>    COST <tspan fill="${PX.text}">≈ ${usd(cost)}</tspan><title>New tokens: fresh input, cache writes and output across every agent in this run. Cache reads are left out. Cost is an estimate at list price, cache reads included.</title></text>`,
   )
   g.push(`<rect x="${pad}" y="70" width="${W - pad * 2}" height="1" fill="${PX.line}"/>`)
 
@@ -420,22 +464,36 @@ export function flowSvg(run: Run, now: number, focus: string): string {
   )
   g.push(`<text x="${pad + 84}" y="${bodyEnd + 32}" fill="${nl.color}" font-size="12">${esc(clip(nl.text, 120))}</text>`)
 
-  // Tokens, one bar per model.
-  const bars = totals(run)
-  const max = Math.max(1, ...bars.map(([, t]) => t.in + t.cached + t.out))
-  const barW = 150
-  bars.forEach(([name, t], i) => {
-    const x = pad + 4 + i * 300
-    const y = bodyEnd + 62
-    const sum = t.in + t.cached + t.out
-    g.push(`<text x="${x}" y="${y + 8}" fill="${t.color}" font-size="10" font-weight="700" letter-spacing="1.5">${name}</text>`)
-    g.push(`<rect x="${x + 66}" y="${y}" width="${barW}" height="8" rx="4" fill="${PX.line}"/>`)
-    g.push(`<rect x="${x + 66}" y="${y}" width="${Math.max(4, Math.round((sum / max) * barW))}" height="8" rx="4" fill="${t.color}" opacity="0.85"/>`)
-    g.push(
-      `<text x="${x + 66 + barW + 10}" y="${y + 8}" fill="${PX.muted}" font-size="10">${k(sum)}<title>in ${k(t.in)} · cached ${k(t.cached)} · out ${k(t.out)}</title></text>`,
-    )
+  // Telemetry: one row per model. What was spent and what it cost; the
+  // advanced view adds where the input came from.
+  const rows = totals(run)
+  const max = Math.max(1, ...rows.map(([, t]) => spent(t)))
+  const x0 = pad + 4
+  const barW = 220
+  const col = { bar: x0 + 80, spent: x0 + 320, usd: x0 + 400, in: x0 + 500, cached: x0 + 650, out: x0 + 780 }
+  const top = bodyEnd + 66
+  const head = (x: number, label: string) =>
+    `<text x="${x}" y="${top}" fill="${PX.faint}" font-size="9" letter-spacing="1.5">${label}</text>`
+  if (rows.length) {
+    g.push(head(x0, 'MODEL'), head(col.bar, 'SHARE OF NEW TOKENS'), head(col.spent, 'NEW'), head(col.usd, 'COST'))
+    if (advanced) g.push(head(col.in, 'INPUT (W = CACHE WRITE)'), head(col.cached, 'CACHE READ'), head(col.out, 'OUTPUT'))
+  }
+  rows.forEach(([name, t], i) => {
+    const y = top + 20 + i * 24
+    const sum = spent(t)
+    const cell = (x: number, v: string, fill: string = PX.muted) => `<text x="${x}" y="${y}" fill="${fill}" font-size="10.5">${v}</text>`
+    g.push(`<text x="${x0}" y="${y}" fill="${t.color}" font-size="10" font-weight="700" letter-spacing="1.5">${name}</text>`)
+    g.push(`<rect x="${col.bar}" y="${y - 8}" width="${barW}" height="8" rx="4" fill="${PX.line}"/>`)
+    g.push(`<rect x="${col.bar}" y="${y - 8}" width="${Math.max(4, Math.round((sum / max) * barW))}" height="8" rx="4" fill="${t.color}" opacity="0.85"/>`)
+    g.push(cell(col.spent, k(sum), PX.text), cell(col.usd, `≈ ${usd(t.usd)}`, PX.text))
+    if (advanced)
+      g.push(
+        cell(col.in, `${k(t.in)}${t.written ? `<tspan fill="${PX.faint}"> (${k(t.written)} W)</tspan>` : ''}`),
+        cell(col.cached, k(t.cached)),
+        cell(col.out, k(t.out)),
+      )
   })
-  if (!bars.length) g.push(`<text x="${pad + 4}" y="${bodyEnd + 70}" fill="${PX.faint}" font-size="10" letter-spacing="1.5">NO TOKENS YET</text>`)
+  if (!rows.length) g.push(`<text x="${x0}" y="${top + 4}" fill="${PX.faint}" font-size="10" letter-spacing="1.5">NO TOKENS YET</text>`)
 
   parts.push(`<g font-family="${FONT}">${g.join('\n')}</g>`)
   return `<svg xmlns="http://www.w3.org/2000/svg" xml:space="preserve" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">${parts.join('\n')}</svg>`
