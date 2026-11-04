@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { parsePlan } from '../hooks/register'
+import { givenPlan, parsePlan, stepPassed } from '../hooks/register'
 import { flowSvg } from '../hooks/view'
 import type { AgentNode, Run } from '../types'
 
@@ -145,4 +145,48 @@ test('a hand-back from an agent the executor did not spawn is let through', asyn
     text: '<agent-message from="someone-else">report</agent-message>',
   })
   expect(got.drop).toBeUndefined()
+})
+
+test('briefs the caller wrote are held to files and a check, and review only when asked', async () => {
+  const step = (extra: Record<string, unknown>) => ({ title: 'a', model: 'haiku', brief: 'do a', ...extra })
+  expect(givenPlan([], undefined, 't')).toBe('steps must be a non-empty list')
+  expect(givenPlan([step({ check: 'pnpm vitest run x' })], undefined, 't')).toBe('step 1 names no files')
+  expect(givenPlan([step({ files: ['x.ts'] })], undefined, 't')).toContain('step 1 names no check')
+  const ok = givenPlan([step({ files: ['x.ts'], check: 'pnpm vitest run x' })], undefined, 'the task')
+  expect(typeof ok).toBe('object')
+  if (typeof ok === 'string') return
+  expect(ok.review).toBe(false)
+  expect(ok.steps[0]?.check).toBe('pnpm vitest run x')
+  expect(ok.summary).toBe('the task')
+  const asked = givenPlan([step({ files: ['x.ts'], check: 'c' })], true, 't')
+  expect(typeof asked === 'string' ? asked : asked.review).toBe(true)
+})
+
+test('a step is done only when its last CHECK line says PASS', async () => {
+  expect(stepPassed('CHANGED: x\nCHECK: PASS')).toBe(true)
+  expect(stepPassed('CHANGED: x\nCHECK: FAIL')).toBe(false)
+  expect(stepPassed('CHECK: FAIL\nfixed it\nCHECK: PASS')).toBe(true)
+  expect(stepPassed('all good, tests pass')).toBe(false)
+  expect(stepPassed('')).toBe(false)
+})
+
+test('a run with given briefs says the planner was skipped and no review was asked', async () => {
+  const svg = flowSvg(
+    {
+      id: 'x3',
+      task: 't',
+      status: 'done',
+      startedAt: 0,
+      endedAt: 5_000,
+      verdict: 'NOT ASKED',
+      planner: { ...node('skipped', 'claude-opus-5-5'), role: 'planner' },
+      steps: [{ n: 1, title: 'a', brief: 'b', files: [], dependsOn: [], node: node('done', 'claude-haiku-5-5') }],
+      reviewer: { ...node('skipped', 'claude-opus-5-5'), role: 'reviewer' },
+    },
+    6_000,
+    '',
+  )
+  expect(svg).toContain('– SKIPPED · 1 BRIEF GIVEN')
+  expect(svg).toContain('– SKIPPED · NOT ASKED')
+  expect(svg).toContain('DONE · NOT REVIEWED')
 })

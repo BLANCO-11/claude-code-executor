@@ -5,7 +5,10 @@ import type { AgentNode, NodeStatus, Run, Step } from '../types'
 import { flowSvg, clip, elapsed, k, modelOf, stageOf, totals } from './view'
 
 // The executor: Opus 5.5 plans (medium effort), Sonnet 5.5 or Haiku 5.5 codes
-// each step the plan names, Opus 5.5 reviews the diff. The model calls one tool
+// each step the plan names, Opus 5.5 reviews the diff. When the caller has
+// already read the code it passes its own briefs (`steps`): the planner is
+// skipped, so the code is read for planning once, not twice, and the review
+// runs only when asked or when a step failed. The model calls one tool
 // (`mcp__executor__run`), which answers at once; the pipeline runs in the
 // background, the pane draws it live, and the report arrives as a new prompt.
 //
@@ -60,7 +63,8 @@ Answer with ONE fenced json block and nothing after it:
       "model": "haiku",
       "files": ["path/relative/to/repo.tsx"],
       "dependsOn": [],
-      "brief": "the coder's whole context"
+      "brief": "the coder's whole context",
+      "check": "the targeted test or typecheck command that proves this step"
     }
   ]
 }
@@ -70,7 +74,8 @@ Rules:
 - 1 to ${MAX_STEPS} steps. Fewer is better: one step per coherent change, not per line.
 - A brief is the coder's ENTIRE context. The coder has not seen the task, the conversation or the code you read.
   Name exact files, the components or functions, what to change and why, the surrounding conventions to match,
-  and the targeted test or typecheck command to run (never a whole suite).
+  and the targeted test or typecheck command to run (never a whole suite), also given as "check".
+  A step counts as done only when its coder reports that check passing.
 - "model": choose per step. Haiku costs about a twentieth of Sonnet, so prefer it whenever your brief settles the change:
   "haiku" when the brief names the exact file, the exact place and the exact change (copy, classes, a prop, a guard,
   a test whose cases you spell out, a rename) — the coder only has to carry it out.
@@ -94,8 +99,9 @@ const CODER_PROMPT = `You are a CODER in an executor. You receive one brief from
 Finish with a short report:
 CHANGED: the files you changed
 DID: what you did, in two or three lines
-CHECKED: the command you ran and its result
-OPEN: anything you could not do (or "none")`
+CHECKED: the command you ran and the lines of its output that show the result
+OPEN: anything you could not do (or "none")
+CHECK: PASS   or   CHECK: FAIL   (last line, exactly: PASS only when the command ran and passed)`
 
 const REVIEWER_PROMPT = `You are the REVIEWER of an executor. A planner planned a task and coders carried out the steps.
 You check the result. You NEVER edit files.
@@ -255,7 +261,11 @@ type PlanStep = {
   files: string[]
   dependsOn: number[]
   brief: string
+  /** The targeted test or typecheck the coder runs; required when the caller writes the briefs. */
+  check?: string
 }
+
+type Plan = { summary: string; review: boolean; steps: PlanStep[] }
 
 /**
  * The first whole JSON object at or after `from`, read by scanning — never by looking for the closing fence. A brief
@@ -279,7 +289,7 @@ export function firstObject(text: string, from = 0): string | null {
   return null
 }
 
-export function parsePlan(text: string): { summary: string; review: boolean; steps: PlanStep[] } | string {
+export function parsePlan(text: string): Plan | string {
   const fence = /```json/i.exec(text)
   const raw = firstObject(text, fence ? fence.index : 0)
   let data: unknown
@@ -289,7 +299,28 @@ export function parsePlan(text: string): { summary: string; review: boolean; ste
     data = undefined
   }
   if (!data || typeof data !== 'object') return 'the planner did not answer with a JSON plan'
+  return validatePlan(data)
+}
 
+/**
+ * Briefs the caller wrote itself. Held to more than a planner's plan: each must name its files and the check that
+ * proves it, because no planner and (by default) no reviewer stands between it and the coder. A brief that cannot
+ * be checked is refused, never sent. The review runs only when asked; a failed step forces one anyway.
+ */
+export function givenPlan(steps: unknown, review: unknown, summary: unknown): Plan | string {
+  if (!Array.isArray(steps) || steps.length === 0) return 'steps must be a non-empty list'
+  for (const [i, s] of (steps as Record<string, unknown>[]).entries()) {
+    const n = typeof s?.n === 'number' ? s.n : i + 1
+    if (!Array.isArray(s?.files) || !s.files.some(f => typeof f === 'string' && f.trim()))
+      return `step ${n} names no files`
+    if (typeof s?.check !== 'string' || !s.check.trim())
+      return `step ${n} names no check (the targeted test or typecheck that proves it)`
+  }
+  const plan = validatePlan({ summary, steps })
+  return typeof plan === 'string' ? plan : { ...plan, review: review === true }
+}
+
+function validatePlan(data: object): Plan | string {
   const d = data as { summary?: unknown; review?: unknown; steps?: unknown }
   if (!Array.isArray(d.steps) || d.steps.length === 0) return 'the plan has no steps'
   if (d.steps.length > MAX_STEPS) return `the plan has ${d.steps.length} steps (at most ${MAX_STEPS})`
@@ -307,6 +338,7 @@ export function parsePlan(text: string): { summary: string; review: boolean; ste
         ? s.dependsOn.filter((x): x is number => typeof x === 'number')
         : [],
       brief,
+      ...(typeof s.check === 'string' && s.check.trim() ? { check: s.check.trim() } : {}),
     })
   }
   const ids = new Set(steps.map(s => s.n))
@@ -321,17 +353,28 @@ export function parsePlan(text: string): { summary: string; review: boolean; ste
   return { summary: typeof d.summary === 'string' ? d.summary : '', review: d.review !== false, steps }
 }
 
+/** A coder's report counts as done only when its last CHECK line says PASS. */
+export function stepPassed(report: string): boolean {
+  const lines = [...report.matchAll(/^\s*CHECK:\s*(PASS|FAIL)\b/gim)]
+  return lines.length > 0 && lines[lines.length - 1]![1]!.toUpperCase() === 'PASS'
+}
+
 // ── The pipeline ───────────────────────────────────────────────────────────
 
-async function pipeline($: $Like, runId: string, task: string, context: string) {
+async function pipeline($: $Like, runId: string, task: string, context: string, given?: Plan) {
   try {
-    // 1. Plan.
-    const planAsk = `TASK\n${task}${context ? `\n\nCONTEXT FROM THE PERSON\n${context}` : ''}`
-    const planned = await runAgent($, runId, 'planner', AGENT.planner, planAsk, 'executor: plan')
-    const plan = parsePlan(planned.answer)
+    // 1. Plan — unless the caller wrote the briefs.
+    let plan: Plan | string
+    if (given) plan = given
+    else {
+      const planAsk = `TASK\n${task}${context ? `\n\nCONTEXT FROM THE PERSON\n${context}` : ''}`
+      const planned = await runAgent($, runId, 'planner', AGENT.planner, planAsk, 'executor: plan')
+      plan = parsePlan(planned.answer)
+    }
     if (typeof plan === 'string') throw new Error(`planning failed: ${plan}`)
+    const p = plan
 
-    const steps: Step[] = plan.steps.map(s => ({
+    const steps: Step[] = p.steps.map(s => ({
       n: s.n,
       title: s.title,
       brief: s.brief,
@@ -339,7 +382,7 @@ async function pipeline($: $Like, runId: string, task: string, context: string) 
       dependsOn: s.dependsOn,
       node: node('coder', MODELS[s.model]),
     }))
-    await patchRun($, runId, r => ({ ...r, status: 'coding', planSummary: plan.summary, steps }))
+    await patchRun($, runId, r => ({ ...r, status: 'coding', planSummary: p.summary, steps }))
 
     // 2. Code: every step whose dependencies are done starts at once.
     const state = new Map<number, NodeStatus>(steps.map(s => [s.n, 'waiting']))
@@ -356,14 +399,18 @@ async function pipeline($: $Like, runId: string, task: string, context: string) 
           }
           if (!deps.every(d => d === 'done')) continue
           state.set(s.n, 'running')
-          const model = plan.steps.find(p => p.n === s.n)!.model
+          const ps = p.steps.find(x => x.n === s.n)!
           const ask = `BRIEF (step ${s.n} of ${steps.length}: ${s.title})\n${s.brief}${
             s.files.length ? `\n\nFILES\n${s.files.join('\n')}` : ''
-          }`
-          void runAgent($, runId, s.n, AGENT[model], ask, `executor: step ${s.n}`).then(got => {
-            const ok = got.reason === 'answer' && got.answer.trim() !== ''
+          }${ps.check ? `\n\nCHECK (run it and report its result)\n${ps.check}` : ''}`
+          void runAgent($, runId, s.n, AGENT[ps.model], ask, `executor: step ${s.n}`).then(got => {
+            // Done means a passing check, said in so many words: an answer without one is a failed step.
+            const checked = stepPassed(got.answer)
+            const ok = got.reason === 'answer' && checked
             state.set(s.n, ok ? 'done' : 'failed')
             reports.set(s.n, got.answer || `(no report: ${got.reason})`)
+            if (!ok && got.reason === 'answer')
+              void patchSlot($, runId, s.n, n => ({ ...n, status: 'failed', summary: 'no passing check reported' }))
             pump()
           })
         }
@@ -382,16 +429,18 @@ async function pipeline($: $Like, runId: string, task: string, context: string) 
       pump()
     })
 
-    // 3. Review — unless the planner said the change is too small to need one.
-    // A step that did not finish always gets a review: that is when it matters.
+    // 3. Review — unless the planner judged the change small, or the caller wrote
+    // the briefs and did not ask for one. A step that did not finish always gets a
+    // review: that is when it matters.
     const failed = [...state.values()].filter(v => v !== 'done').length
-    if (!plan.review && failed === 0) {
-      await patchSlot($, runId, 'reviewer', n => ({ ...n, status: 'skipped', summary: 'the planner judged the change small enough to skip review' }))
-      await patchRun($, runId, r => ({ ...r, status: 'done', endedAt: Date.now(), verdict: 'NOT REVIEWED' }))
+    if (!p.review && failed === 0) {
+      const why = given ? 'the caller did not ask for one' : 'the planner judged the change small enough to skip review'
+      await patchSlot($, runId, 'reviewer', n => ({ ...n, status: 'skipped', summary: why }))
+      await patchRun($, runId, r => ({ ...r, status: 'done', endedAt: Date.now(), verdict: given ? 'NOT ASKED' : 'NOT REVIEWED' }))
       await $.prompt.submit({
         text: [
-          `[executor ${runId}] finished — not reviewed (the planner judged it small), ${steps.length} of ${steps.length} steps done.`,
-          `PLAN: ${plan.summary}`,
+          `[executor ${runId}] finished — not reviewed (${given ? 'no review asked' : 'the planner judged it small'}), every step's check passed, ${steps.length} of ${steps.length} steps done.`,
+          `PLAN: ${p.summary}`,
           ...steps.map(
             s =>
               `--- step ${s.n} · ${modelOf(s.node.model).name} · ${state.get(s.n)} · ${s.title}\n${clip(reports.get(s.n) ?? '', 1500)}`,
@@ -404,7 +453,7 @@ async function pipeline($: $Like, runId: string, task: string, context: string) 
     await patchRun($, runId, r => ({ ...r, status: 'reviewing' }))
     const reviewAsk = [
       `TASK\n${task}`,
-      `PLAN\n${plan.summary}`,
+      `PLAN\n${p.summary}`,
       ...steps.map(
         s => `STEP ${s.n} — ${s.title} [${state.get(s.n)}]\nBRIEF\n${s.brief}\nREPORT\n${reports.get(s.n) ?? '(did not run)'}`,
       ),
@@ -425,7 +474,7 @@ async function pipeline($: $Like, runId: string, task: string, context: string) 
     await $.prompt.submit({
       text: [
         `[executor ${runId}] finished — reviewer: ${verdict ?? 'no verdict'}, ${steps.length - failed} of ${steps.length} steps done.`,
-        `PLAN: ${plan.summary}`,
+        `PLAN: ${p.summary}`,
         ...steps.map(
           s =>
             `--- step ${s.n} · ${modelOf(s.node.model).name} · ${state.get(s.n)} · ${s.title}\n${clip(reports.get(s.n) ?? '', 1500)}`,
@@ -485,7 +534,12 @@ export const register: Register = on => {
         'Run a coding task through the executor: Opus 5.5 (medium effort) plans and writes one brief per step, ' +
         'Haiku 5.5 or Sonnet 5.5 coders carry out the steps (independent steps in parallel), Opus 5.5 reviews the diff (skipped when the planner judges the change small). ' +
         'Answers at once with a run id; the full report (plan, each coder report, the review) arrives later as a new message. ' +
-        'The person watches it live in the "Executor" pane (/executor). Give the task in full: the planner has not seen this conversation.',
+        'The person watches it live in the "Executor" pane (/executor). Give the task in full: the planner has not seen this conversation. ' +
+        'WHEN YOU HAVE ALREADY READ THE CODE, pass `steps` with your own briefs instead: the planner is skipped, so the code is not read twice. ' +
+        'Each brief is the coder\'s whole context (it has not seen this conversation or CLAUDE.md): name the exact files, what to change and why, the conventions to match, and the check. ' +
+        'Choose "haiku" only when the brief names the exact place and change; "sonnet" when the coder must decide something. ' +
+        'Set `review: true` when the change touches permissions, security, data, shared logic or anything you will not check yourself; a failed step is always reviewed. ' +
+        'Without a review you check the diff yourself.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -493,6 +547,28 @@ export const register: Register = on => {
           context: {
             type: 'string',
             description: 'Anything the planner should know: file paths, what the person said, screenshots described in words.',
+          },
+          steps: {
+            type: 'array',
+            description: 'Your own briefs, when you have read the code. Skips the planner. Two steps touching one file must be ordered with dependsOn.',
+            maxItems: MAX_STEPS,
+            items: {
+              type: 'object',
+              properties: {
+                n: { type: 'number' },
+                title: { type: 'string' },
+                model: { type: 'string', enum: ['haiku', 'sonnet'] },
+                files: { type: 'array', items: { type: 'string' } },
+                dependsOn: { type: 'array', items: { type: 'number' } },
+                brief: { type: 'string' },
+                check: { type: 'string', description: 'The targeted test or typecheck command that proves the step; never a whole suite.' },
+              },
+              required: ['title', 'model', 'files', 'brief', 'check'],
+            },
+          },
+          review: {
+            type: 'boolean',
+            description: 'With `steps`: run the Opus reviewer over the diff. Off by default; a failed step is reviewed anyway.',
           },
         },
         required: ['task'],
@@ -522,13 +598,23 @@ export const register: Register = on => {
     const task = typeof input.task === 'string' ? input.task.trim() : ''
     if (!task) return { deny: 'task is required' }
     const context = typeof input.context === 'string' ? input.context : ''
+    const raw = e as unknown as { steps?: unknown; review?: unknown }
+    let given: Plan | undefined
+    if (raw.steps !== undefined) {
+      const got = givenPlan(raw.steps, raw.review, task)
+      // Refused before anything starts, with the reason, so the caller fixes the brief.
+      if (typeof got === 'string') return { deny: `steps refused: ${got}` }
+      given = got
+    }
     const id = `x${(Date.now() % 1_000_000).toString(36)}`
     const run: Run = {
       id,
       task,
-      status: 'planning',
+      status: given ? 'coding' : 'planning',
       startedAt: Date.now(),
-      planner: node('planner', MODELS.opus, 'medium'),
+      planner: given
+        ? { ...node('planner', MODELS.opus, 'medium'), status: 'skipped', summary: 'the caller wrote the briefs' }
+        : node('planner', MODELS.opus, 'medium'),
       steps: [],
       reviewer: node('reviewer', MODELS.opus, 'medium'),
     }
@@ -536,10 +622,12 @@ export const register: Register = on => {
     await update($, selected, () => 0)
     await $.ui.open({ id: PANE, title: 'Executor' })
     // Started after this hook returns, on purpose (see the top of the file).
-    void pipeline($, id, task, context)
+    void pipeline($, id, task, context, given)
     // A plugin tool's result is a string or a list of blocks, never an object.
     return {
-      result: `Executor run ${id} started. Planning has begun; the report arrives as a new message when the review is done, and the Executor pane shows it live.`,
+      result: given
+        ? `Executor run ${id} started with your ${given.steps.length} brief(s); no planner. The report arrives as a new message, and the Executor pane shows it live.`
+        : `Executor run ${id} started. Planning has begun; the report arrives as a new message when the review is done, and the Executor pane shows it live.`,
     }
   })
 

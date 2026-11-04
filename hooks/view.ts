@@ -94,7 +94,7 @@ export function stageOf(run: Run): string {
 }
 
 function runState(run: Run): { word: string; color: string } {
-  if (run.status === 'done') return { word: run.verdict === 'NOT REVIEWED' ? 'DONE · NOT REVIEWED' : 'DONE', color: PX.green }
+  if (run.status === 'done') return { word: run.verdict === 'NOT REVIEWED' || run.verdict === 'NOT ASKED' ? 'DONE · NOT REVIEWED' : 'DONE', color: PX.green }
   if (run.status === 'failed')
     return run.verdict === 'NEEDS-WORK' ? { word: 'NEEDS WORK', color: PX.amber } : { word: 'FAILED', color: PX.red }
   const word = run.status === 'planning' ? 'PLANNING' : run.status === 'coding' ? 'CODING' : 'REVIEWING'
@@ -366,7 +366,11 @@ export function flowSvg(run: Run, now: number, focus: string): string {
       sideY,
       'PLANNER',
       run.planner,
-      run.planner.status === 'done' ? { text: `✓ PLAN READY · ${steps.length} STEP${steps.length === 1 ? '' : 'S'}`, color: PX.cyan } : null,
+      run.planner.status === 'done'
+        ? { text: `✓ PLAN READY · ${steps.length} STEP${steps.length === 1 ? '' : 'S'}`, color: PX.cyan }
+        : run.planner.status === 'skipped'
+          ? { text: `– SKIPPED · ${steps.length} BRIEF${steps.length === 1 ? '' : 'S'} GIVEN`, color: PX.muted }
+          : null,
       run.planner.status === 'running' ? 'Reading the code and writing one brief per step.' : '',
       now,
       focus === 'planner',
@@ -394,6 +398,8 @@ export function flowSvg(run: Run, now: number, focus: string): string {
         ? { text: '! NEEDS WORK', color: PX.amber }
         : v === 'NOT REVIEWED'
           ? { text: '– SKIPPED · SMALL CHANGE', color: PX.muted }
+          : v === 'NOT ASKED'
+            ? { text: '– SKIPPED · NOT ASKED', color: PX.muted }
           : v
             ? { text: v, color: PX.red }
             : null
