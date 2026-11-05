@@ -106,6 +106,27 @@ test('the flow drawing shows each agent, its state and what moves', async () => 
   expect(svg).toContain('stroke-dasharray="3 3"')
 })
 
+test('a cost under a cent is escaped, so the drawing stays valid SVG (the editor draws it as an image)', async () => {
+  const cheap = { ...node('done', 'claude-haiku-5-5'), tokensIn: 50, tokensOut: 10 }
+  const run: Run = {
+    id: 'x2',
+    task: 't',
+    status: 'failed',
+    verdict: 'NEEDS-WORK',
+    startedAt: 0,
+    endedAt: 1000,
+    planner: { ...node('skipped', 'claude-opus-5-5'), role: 'planner' },
+    steps: [{ n: 1, title: 's', brief: 'b', files: [], dependsOn: [], node: cheap }],
+    reviewer: { ...node('done', 'claude-opus-5-5'), role: 'reviewer' },
+  }
+  for (const adv of [false, true]) {
+    const svg = flowSvg(run, 5000, '', adv)
+    // A raw "<" outside a tag makes the markup unreadable: the editor then shows only the alt text.
+    expect(svg).not.toMatch(/<\$/)
+    expect(svg).toContain('&lt;$0.01')
+  }
+})
+
 test('a finished run says how it ended', async () => {
   const done = (verdict: string, status: Run['status']): string =>
     flowSvg(

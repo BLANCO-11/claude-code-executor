@@ -92,7 +92,9 @@ export function stageOf(run: Run): string {
         ? 'REVIEW'
         : run.status === 'done'
           ? 'DONE'
-          : 'FAILED'
+          : run.verdict === 'NEEDS-WORK'
+            ? 'NEEDS WORK'
+            : 'FAILED'
 }
 
 function runState(run: Run): { word: string; color: string } {
@@ -298,7 +300,7 @@ function stepCard(x: number, y: number, w: number, h: number, s: Step, steps: St
   const line = stepLine(s, steps)
   if (line) out.push(`<text x="${x + 20}" y="${y + 62}" fill="${live ? PX.cyan : PX.muted}" font-size="10.5">${esc(clip(line, lineChars))}</text>`)
   out.push(
-    `<text x="${x + 20}" y="${y + h - 12}" fill="${m.color}" font-size="9.5" font-weight="700" letter-spacing="1.5">${m.short}<tspan fill="${PX.faint}" font-weight="400"> · ${elapsed(n, now)}${n.tokensIn + n.tokensOut ? ` · ${k(n.tokensIn + n.tokensOut)} NEW · ≈ ${usd(costOf(m.short, n))}` : ''}${n.toolCalls ? ` · ${n.toolCalls} CALLS` : ''}</tspan></text>`,
+    `<text x="${x + 20}" y="${y + h - 12}" fill="${m.color}" font-size="9.5" font-weight="700" letter-spacing="1.5">${m.short}<tspan fill="${PX.faint}" font-weight="400"> · ${elapsed(n, now)}${n.tokensIn + n.tokensOut ? ` · ${k(n.tokensIn + n.tokensOut)} NEW · ≈ ${esc(usd(costOf(m.short, n)))}` : ''}${n.toolCalls ? ` · ${n.toolCalls} CALLS` : ''}</tspan></text>`,
   )
   out.push(orb(x + w - 34, y + h / 2, m.color, n))
   return `<g>${out.join('')}</g>`
@@ -363,7 +365,7 @@ export function flowSvg(run: Run, now: number, focus: string, advanced = false):
   )
   g.push(`<text x="${pad + 330}" y="49" fill="${rs.color}" font-size="11" font-weight="700" letter-spacing="1.5">${esc(rs.word)}</text>`)
   g.push(
-    `<text x="${W - pad - 4}" y="49" fill="${PX.muted}" font-size="11" letter-spacing="1.5" text-anchor="end">TIME <tspan fill="${PX.text}">${clock((run.endedAt ?? now) - run.startedAt)}</tspan>    NEW TOKENS <tspan fill="${PX.text}">${k(total)}</tspan>    COST <tspan fill="${PX.text}">≈ ${usd(cost)}</tspan><title>New tokens: fresh input, cache writes and output across every agent in this run. Cache reads are left out. Cost is an estimate at list price, cache reads included.</title></text>`,
+    `<text x="${W - pad - 4}" y="49" fill="${PX.muted}" font-size="11" letter-spacing="1.5" text-anchor="end">TIME <tspan fill="${PX.text}">${clock((run.endedAt ?? now) - run.startedAt)}</tspan>    NEW TOKENS <tspan fill="${PX.text}">${k(total)}</tspan>    COST <tspan fill="${PX.text}">≈ ${esc(usd(cost))}</tspan><title>New tokens: fresh input, cache writes and output across every agent in this run. Cache reads are left out. Cost is an estimate at list price, cache reads included.</title></text>`,
   )
   g.push(`<rect x="${pad}" y="70" width="${W - pad * 2}" height="1" fill="${PX.line}"/>`)
 
@@ -485,7 +487,7 @@ export function flowSvg(run: Run, now: number, focus: string, advanced = false):
     g.push(`<text x="${x0}" y="${y}" fill="${t.color}" font-size="10" font-weight="700" letter-spacing="1.5">${name}</text>`)
     g.push(`<rect x="${col.bar}" y="${y - 8}" width="${barW}" height="8" rx="4" fill="${PX.line}"/>`)
     g.push(`<rect x="${col.bar}" y="${y - 8}" width="${Math.max(4, Math.round((sum / max) * barW))}" height="8" rx="4" fill="${t.color}" opacity="0.85"/>`)
-    g.push(cell(col.spent, k(sum), PX.text), cell(col.usd, `≈ ${usd(t.usd)}`, PX.text))
+    g.push(cell(col.spent, k(sum), PX.text), cell(col.usd, `≈ ${esc(usd(t.usd))}`, PX.text))
     if (advanced)
       g.push(
         cell(col.in, `${k(t.in)}${t.written ? `<tspan fill="${PX.faint}"> (${k(t.written)} W)</tspan>` : ''}`),
